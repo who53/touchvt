@@ -1,7 +1,14 @@
-CC = gcc
-CFLAGS = -O3 -Wall -Wextra $(shell pkg-config --cflags libinput libudev libtsm)
+CC ?= gcc
+PREFIX ?= /usr
+DESTDIR ?=
+
+CFLAGS = -O3 -Wall -Wextra -D_GNU_SOURCE -DSTB_TRUETYPE_IMPLEMENTATION \
+         $(shell pkg-config --cflags libinput libudev libtsm)
 LDFLAGS = $(shell pkg-config --libs libinput libudev libtsm) -lm -lutil
+
 TARGET = touchvt
+BINDIR = $(PREFIX)/bin
+SYSTEMDDIR = $(PREFIX)/lib/systemd/system
 
 all: $(TARGET)
 
@@ -12,7 +19,8 @@ clean:
 	rm -f $(TARGET)
 
 install: $(TARGET)
-	install -Dm755 $(TARGET) /usr/local/bin/$(TARGET)
-	install -Dm644 touchvt.service /etc/systemd/system/touchvt@.service
+	install -Dm755 $(TARGET) $(DESTDIR)$(BINDIR)/$(TARGET)
+	install -Dm644 touchvt.service \
+		$(DESTDIR)$(SYSTEMDDIR)/touchvt@.service
 
 .PHONY: all clean install

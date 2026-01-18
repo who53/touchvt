@@ -10,7 +10,7 @@ IgnoreOnIsolate=yes
 ConditionPathExists=/dev/tty0
 
 [Service]
-ExecStart=/usr/local/bin/touchvt --vt %I /sbin/agetty -o '-p -- \\u' --noclear --autologin droidian - xterm-256color
+ExecStart=/usr/bin/touchvt --vt %I /sbin/agetty -o '-p -- \\u' --noclear --autologin droidian - xterm-256color
 UtmpIdentifier=%I
 TTYPath=/dev/%I
 TTYReset=yes

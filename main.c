@@ -1,5 +1,3 @@
-#define _GNU_SOURCE
-#define STB_TRUETYPE_IMPLEMENTATION
 #include "def_font.h"
 #include "stb_truetype.h"
 #include <errno.h>
@@ -321,6 +319,7 @@ static void resize_layout(int size) {
             .ws_xpixel = term_cols * cell_w,
             .ws_ypixel = term_rows * cell_h};
         ioctl(pty_master, TIOCSWINSZ, &ws);
+        fill_rect(0, 0, fb_w, fb_h, 0xff000000);
         draw_keyboard();
         draw_terminal();
     }
@@ -331,11 +330,11 @@ static void handle_key(int r, int c, int down) {
     uint32_t ksym = shift_on ? ki->keysym_shift : ki->keysym;
 
     if (down && ctrl_on) {
-        if (ksym == '-' || ksym == '_') {
+        if (!shift_on && ksym == '-') {
             resize_layout(current_font_size - 2);
             return;
         }
-        if (ksym == '=' || ksym == '+') {
+        if (shift_on && ksym == '+') {
             resize_layout(current_font_size + 2);
             return;
         }
@@ -487,7 +486,7 @@ int main(int argc, char **argv) {
     struct libinput *li = libinput_udev_create_context(
         &(struct libinput_interface){
             .open_restricted = (int (*)(const char *, int, void *))open,
-            .close_restricted = (void (*)(int, void *))close},
+            .close_restricted = (void (*)(int, void *))(void (*)(void))close},
         NULL, udev);
     libinput_udev_assign_seat(li, "seat0");
     int li_fd = libinput_get_fd(li);
