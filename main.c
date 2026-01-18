@@ -403,7 +403,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    memset(fb_mem, 0, fb_size);
+    ioctl(fb_fd, FBIOPAN_DISPLAY, &vinfo);
 
     font_data = font_ttf;
     int cmd_start_index = argc;
