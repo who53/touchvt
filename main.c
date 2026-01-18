@@ -6,6 +6,7 @@
 #include <libtsm.h>
 #include <libudev.h>
 #include <linux/fb.h>
+#include <linux/kd.h>
 #include <linux/vt.h>
 #include <poll.h>
 #include <pty.h>
@@ -20,9 +21,10 @@
 #include <unistd.h>
 
 static volatile sig_atomic_t running = 1;
-static int fb_fd, pty_master;
-static pid_t child_pid;
-static uint32_t *fb_mem;
+static int fb_fd = -1, pty_master = -1;
+static pid_t child_pid = -1;
+static int active_vt = -1;
+static uint32_t *fb_mem = MAP_FAILED;
 static struct fb_var_screeninfo vinfo;
 static struct fb_fix_screeninfo finfo;
 static int fb_w, fb_h, fb_stride;
@@ -95,15 +97,15 @@ static void draw_bitmap(int x, int y, const unsigned char *bmp, int bw, int bh, 
     for (int j = 0; j < bh; j++) {
         int screen_y = y + j;
         if (screen_y < 0 || screen_y >= fb_h) continue;
-        
+
         uint32_t *dst = fb_mem + screen_y * fb_stride_pixels;
         for (int i = 0; i < bw; i++) {
             int dpx = x + i;
             if (dpx < 0 || dpx >= fb_w) continue;
-            
+
             unsigned char alpha = bmp[j * bw + i];
             if (alpha == 0) continue;
-            
+
             if (alpha == 255) {
                 dst[dpx] = fg_color;
             } else {
@@ -132,11 +134,11 @@ static unsigned char *load_font_file(const char *path) {
 
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
-    
+
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
-    
+
     unsigned char *data = malloc(size);
     if (!data || fread(data, 1, size, f) != (size_t)size) {
         free(data);
@@ -174,7 +176,7 @@ static void draw_keyboard(void) {
         for (int col = 0; col < COLS; col++) {
             int kx = col * kw, ky = kb_y + r * kh;
             int cur_w = kw;
-            
+
             if (r == 4 && col == 5) {
                 cur_w = kw * 2;
             } else if (r == 4 && col == 6) {
@@ -183,13 +185,13 @@ static void draw_keyboard(void) {
 
             const struct key_info *ki = &keyboard_layout[r][col];
             uint32_t ksym = shift_on ? ki->keysym_shift : ki->keysym;
-            
+
             int is_pressed = (r == pressed_row && col == pressed_col);
             int is_mod = (ksym == 0xffe1 || ksym == 0xffe2 || ksym == 0xffe3 || ksym == 0xffe9);
             int is_active = (is_mod && ((ksym == 0xffe1 || ksym == 0xffe2) ? shift_on : (ksym == 0xffe3 ? ctrl_on : alt_on)));
-            
+
             uint32_t bg = is_pressed ? 0xff404040 : (is_active ? 0xff303060 : 0xff000000);
-            
+
             fill_rect(kx + 1, ky + 1, cur_w - 2, kh - 2, bg);
 
             const char *txt = shift_on ? ki->label_shift : ki->label;
@@ -218,7 +220,7 @@ static void draw_keyboard(void) {
 
 static void draw_glyph(int px, int py, uint32_t ch, uint32_t fg, uint32_t bg, unsigned int width) {
     int total_w = width * cell_w;
-    
+
     fill_rect(px, py, total_w, cell_h, bg);
 
     if (ch == 0 || ch == ' ')
@@ -232,7 +234,7 @@ static void draw_glyph(int px, int py, uint32_t ch, uint32_t fg, uint32_t bg, un
     int ascent, descent, linegap;
     stbtt_GetFontVMetrics(&font, &ascent, &descent, &linegap);
     int baseline = py + (int)(ascent * font_scale);
-    
+
     draw_bitmap(px + xoff, baseline + yoff, bmp, w, h, fg);
     stbtt_FreeBitmap(bmp, NULL);
 }
@@ -242,7 +244,7 @@ static int term_draw_cb(struct tsm_screen *con, uint64_t id, const uint32_t *ch,
                         unsigned int posy, const struct tsm_screen_attr *attr,
                         tsm_age_t age, void *data) {
     (void)con; (void)id; (void)age; (void)data;
-    
+
     uint32_t fg = 0xff000000 | (attr->fr << 16) | (attr->fg << 8) | attr->fb;
     uint32_t bg = 0xff000000 | (attr->br << 16) | (attr->bg << 8) | attr->bb;
 
@@ -251,11 +253,11 @@ static int term_draw_cb(struct tsm_screen *con, uint64_t id, const uint32_t *ch,
         fg = bg;
         bg = tmp;
     }
-    
+
     uint32_t c = (len > 0) ? ch[0] : ' ';
     int px = posx * cell_w;
     int py = posy * cell_h;
-    
+
     draw_glyph(px, py, c, fg, bg, width);
 
     unsigned int cx = tsm_screen_get_cursor_x(tsm_screen);
@@ -291,7 +293,7 @@ static void resize_layout(int size) {
     int ascent, descent, linegap;
     stbtt_GetFontVMetrics(&font, &ascent, &descent, &linegap);
     cell_h = (int)((ascent - descent + linegap) * font_scale) + 2;
-    
+
     int advance, lsb;
     stbtt_GetCodepointHMetrics(&font, 'M', &advance, &lsb);
     cell_w = (int)(advance * font_scale);
@@ -361,7 +363,7 @@ static void handle_key(int r, int c, int down) {
     if (shift_on) mods |= TSM_SHIFT_MASK;
     if (ctrl_on) mods |= TSM_CONTROL_MASK;
     if (alt_on) mods |= TSM_ALT_MASK;
-    
+
     uint32_t unicode = (ksym < 0x100) ? ksym : TSM_VTE_INVALID;
     tsm_vte_handle_keyboard(tsm_vte, ksym, 0, mods, unicode);
 }
@@ -393,14 +395,14 @@ int main(int argc, char **argv) {
     fb_h = vinfo.yres;
     fb_stride = finfo.line_length;
     fb_stride_pixels = fb_stride / 4;
-    
+
     size_t fb_size = fb_h * fb_stride;
     fb_mem = mmap(NULL, fb_size, PROT_READ | PROT_WRITE, MAP_SHARED, fb_fd, 0);
     if (fb_mem == MAP_FAILED) {
         perror("touchvt: mmap");
         return 1;
     }
-    
+
     memset(fb_mem, 0, fb_size);
 
     font_data = font_ttf;
@@ -426,11 +428,15 @@ int main(int argc, char **argv) {
                 int vt_num = 0;
                 if (sscanf(argv[i + 1], "tty%d", &vt_num) == 1 ||
                     sscanf(argv[i + 1], "%d", &vt_num) == 1) {
-                    int tty0 = open("/dev/tty0", O_RDWR);
-                    if (tty0 >= 0) {
-                        ioctl(tty0, VT_ACTIVATE, vt_num);
-                        ioctl(tty0, VT_WAITACTIVE, vt_num);
-                        close(tty0);
+                    active_vt = vt_num;
+                    char tty_path[32];
+                    snprintf(tty_path, sizeof(tty_path), "/dev/tty%d", vt_num);
+                    int vt_fd = open(tty_path, O_RDWR | O_NOCTTY);
+                    if (vt_fd >= 0) {
+                        ioctl(vt_fd, VT_ACTIVATE, vt_num);
+                        ioctl(vt_fd, VT_WAITACTIVE, vt_num);
+                        ioctl(vt_fd, KDSETMODE, KD_GRAPHICS);
+                        close(vt_fd);
                     }
                 }
                 i++;
@@ -470,6 +476,13 @@ int main(int argc, char **argv) {
     }
     if (child_pid == 0) {
         setenv("TERM", "xterm-256color", 1);
+        if (active_vt != -1) {
+            char vtnr[16];
+            snprintf(vtnr, sizeof(vtnr), "%d", active_vt);
+            setenv("XDG_VTNR", vtnr, 1);
+        }
+        setenv("XDG_SESSION_TYPE", "tty", 1);
+        setenv("XDG_SEAT", "seat0", 1);
         if (cmd_start_index < argc) {
             execvp(argv[cmd_start_index], &argv[cmd_start_index]);
             perror("touchvt: execvp");
@@ -578,7 +591,20 @@ int main(int argc, char **argv) {
     udev_unref(udev);
     if (font_data != font_ttf)
         free(font_data);
-    munmap(fb_mem, fb_h * fb_stride);
-    close(fb_fd);
+
+    if (active_vt != -1) {
+        char tty_path[32];
+        snprintf(tty_path, sizeof(tty_path), "/dev/tty%d", active_vt);
+        int vt_fd = open(tty_path, O_RDWR | O_NOCTTY);
+        if (vt_fd >= 0) {
+            ioctl(vt_fd, KDSETMODE, KD_TEXT);
+            close(vt_fd);
+        }
+    }
+
+    if (fb_mem != MAP_FAILED && fb_mem != NULL)
+        munmap(fb_mem, fb_h * fb_stride);
+    if (fb_fd >= 0)
+        close(fb_fd);
     return 0;
 }
