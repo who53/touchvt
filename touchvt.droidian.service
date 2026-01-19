@@ -2,15 +2,19 @@
 Description=Touch VT Emulator on %I
 After=systemd-user-sessions.service
 After=plymouth-quit-wait.service
+After=getty-pre.target
 After=rc-local.service
 Before=getty.target
+Conflicts=rescue.service
+Before=rescue.service
 Conflicts=getty@%i.service
 OnFailure=getty@%i.service
 IgnoreOnIsolate=yes
 ConditionPathExists=/dev/tty0
 
 [Service]
-ExecStart=/usr/bin/touchvt --vt %I /sbin/agetty -o '-p -- \\u' --noclear --autologin droidian - xterm-256color
+ExecStart=/usr/bin/touchvt --vt %I /sbin/agetty --noclear --autologin droidian - xterm-256color
+Type=idle
 UtmpIdentifier=%I
 TTYPath=/dev/%I
 TTYReset=yes
@@ -19,3 +23,5 @@ TTYVTDisallocate=yes
 
 [Install]
 WantedBy=getty.target
+DefaultInstance=tty1
+Alias=autovt@.service

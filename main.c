@@ -1,4 +1,3 @@
-#include "def_font.h"
 #include "stb_truetype.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -19,6 +18,9 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+extern unsigned char font_ttf[];
+extern unsigned int font_ttf_len;
 
 static volatile sig_atomic_t running = 1;
 static int fb_fd = -1, pty_master = -1;
@@ -271,7 +273,7 @@ static int term_draw_cb(struct tsm_screen *con, uint64_t id, const uint32_t *ch,
             for (int i = 0; i < cell_w; i++) {
                 int tx = px + i;
                 if (tx >= 0 && tx < fb_w) {
-                    dst[tx] ^= 0x00ffffff;
+                    dst[tx] = (dst[tx] & 0xff000000) ^ 0x00ffffff;
                 }
             }
         }
@@ -403,6 +405,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    vinfo.xoffset = 0;
+    vinfo.yoffset = 0;
     ioctl(fb_fd, FBIOPAN_DISPLAY, &vinfo);
 
     font_data = font_ttf;
