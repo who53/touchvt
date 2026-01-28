@@ -23,6 +23,7 @@ extern unsigned char font_ttf[];
 extern unsigned int font_ttf_len;
 
 static volatile sig_atomic_t running = 1;
+static volatile sig_atomic_t force_refresh = 0;
 static int fb_fd = -1, pty_master = -1;
 static pid_t child_pid = -1;
 static int active_vt = -1;
@@ -40,6 +41,14 @@ static struct tsm_vte *tsm_vte;
 static int term_cols, term_rows;
 static int cell_w, cell_h;
 static int term_height;
+
+#define GLYPH_CACHE_SIZE 256
+static struct {
+    unsigned char *bitmap;
+    int w, h, xoff, yoff;
+    uint32_t codepoint;
+    int valid;
+} glyph_cache[GLYPH_CACHE_SIZE];
 
 #define ROWS 5
 #define COLS 12
@@ -120,6 +129,44 @@ static void draw_bitmap(int x, int y, const unsigned char *bmp, int bw, int bh, 
 static void sig_handler(int sig) {
     (void)sig;
     running = 0;
+}
+
+static void sigusr1_handler(int sig) {
+    (void)sig;
+    force_refresh = 1;
+}
+
+static void glyph_cache_clear(void) {
+    for (int i = 0; i < GLYPH_CACHE_SIZE; i++) {
+        if (glyph_cache[i].bitmap) {
+            stbtt_FreeBitmap(glyph_cache[i].bitmap, NULL);
+            glyph_cache[i].bitmap = NULL;
+        }
+        glyph_cache[i].valid = 0;
+    }
+}
+
+static unsigned char *glyph_cache_get(uint32_t ch, int *w, int *h, int *xoff, int *yoff) {
+    if (ch < GLYPH_CACHE_SIZE && glyph_cache[ch].valid && glyph_cache[ch].codepoint == ch) {
+        *w = glyph_cache[ch].w;
+        *h = glyph_cache[ch].h;
+        *xoff = glyph_cache[ch].xoff;
+        *yoff = glyph_cache[ch].yoff;
+        return glyph_cache[ch].bitmap;
+    }
+    unsigned char *bmp = stbtt_GetCodepointBitmap(&font, font_scale, font_scale, ch, w, h, xoff, yoff);
+    if (ch < GLYPH_CACHE_SIZE && bmp) {
+        if (glyph_cache[ch].bitmap)
+            stbtt_FreeBitmap(glyph_cache[ch].bitmap, NULL);
+        glyph_cache[ch].bitmap = bmp;
+        glyph_cache[ch].w = *w;
+        glyph_cache[ch].h = *h;
+        glyph_cache[ch].xoff = *xoff;
+        glyph_cache[ch].yoff = *yoff;
+        glyph_cache[ch].codepoint = ch;
+        glyph_cache[ch].valid = 1;
+    }
+    return bmp;
 }
 
 static void sigchld_handler(int sig) {
@@ -229,8 +276,7 @@ static void draw_glyph(int px, int py, uint32_t ch, uint32_t fg, uint32_t bg, un
         return;
 
     int w, h, xoff, yoff;
-    unsigned char *bmp = stbtt_GetCodepointBitmap(&font, font_scale, font_scale,
-                                                  ch, &w, &h, &xoff, &yoff);
+    unsigned char *bmp = glyph_cache_get(ch, &w, &h, &xoff, &yoff);
     if (!bmp) return;
 
     int ascent, descent, linegap;
@@ -238,7 +284,8 @@ static void draw_glyph(int px, int py, uint32_t ch, uint32_t fg, uint32_t bg, un
     int baseline = py + (int)(ascent * font_scale);
 
     draw_bitmap(px + xoff, baseline + yoff, bmp, w, h, fg);
-    stbtt_FreeBitmap(bmp, NULL);
+    if (ch >= GLYPH_CACHE_SIZE)
+        stbtt_FreeBitmap(bmp, NULL);
 }
 
 static int term_draw_cb(struct tsm_screen *con, uint64_t id, const uint32_t *ch,
@@ -290,6 +337,7 @@ static void resize_layout(int size) {
     if (size > 64) size = 64;
     current_font_size = size;
 
+    glyph_cache_clear();
     font_scale = stbtt_ScaleForPixelHeight(&font, current_font_size);
 
     int ascent, descent, linegap;
@@ -385,6 +433,7 @@ int main(int argc, char **argv) {
     signal(SIGINT, sig_handler);
     signal(SIGHUP, SIG_IGN);
     signal(SIGCHLD, sigchld_handler);
+    signal(SIGUSR1, sigusr1_handler);
 
     fb_fd = open("/dev/fb0", O_RDWR);
     if (fb_fd < 0) {
@@ -516,12 +565,21 @@ int main(int argc, char **argv) {
         {.fd = pty_master, .events = POLLIN}
     };
 
+    setgid(32011);
+    setuid(32011);
+
     while (running) {
         int ret = poll(pfds, 2, -1);
         if (ret < 0 && errno != EINTR)
             break;
 
         int input_processed = 0;
+
+        if (force_refresh) {
+            force_refresh = 0;
+            ioctl(fb_fd, FBIOPAN_DISPLAY, &vinfo);
+            continue;
+        }
 
         if (pfds[1].revents & POLLIN) {
             char buf[4096];
@@ -593,6 +651,7 @@ int main(int argc, char **argv) {
     tsm_screen_unref(tsm_screen);
     libinput_unref(li);
     udev_unref(udev);
+    glyph_cache_clear();
     if (font_data != font_ttf)
         free(font_data);
 
